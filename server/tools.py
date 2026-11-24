@@ -144,13 +144,37 @@ HOLD = {
 }
 
 
+def _user_texts(messages) -> list[dict]:
+    return [m for m in messages if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str)]
+
+
+def _script(text: str) -> str:
+    if any("ऀ" <= ch <= "ॿ" for ch in text):
+        return "Hindi"
+    return "Telugu" if any("ఀ" <= ch <= "౿" for ch in text) else "English"
+
+
+def call_language(messages) -> str | None:
+    """The caller's language, from their last full sentence (3+ words). Short replies don't count:
+    speech recognition often writes a name, "okay" or "yes" in Devanagari or Telugu letters."""
+    return next((_script(m["content"]) for m in reversed(_user_texts(messages)) if len(m["content"].split()) >= 3), None)
+
+
+def pin_language(messages) -> None:
+    """If the caller's newest message is a short reply in a different script from the call
+    (an English caller's name heard as "राविकुमार"), tell the LLM which language the call is in.
+    The prompt asks for this too, but Gemini still switched languages on a lone name."""
+    users = _user_texts(messages)
+    if not users or len(users[-1]["content"].split()) >= 3 or "[" in users[-1]["content"]:
+        return
+    lang = call_language(users[:-1])
+    if lang and lang != _script(users[-1]["content"]):
+        reply = "Hindi (Devanagari)" if lang == "Hindi" else "English"
+        users[-1]["content"] += f" [short reply, maybe misheard; this caller speaks {lang}, so reply in {reply}]"
+
+
 def _speaks_hindi(params: FunctionCallParams) -> bool:
-    """Whether the caller's last message was in Devanagari (Hindi or Hinglish)."""
-    last = next((m for m in reversed(params.context.messages) if isinstance(m, dict) and m.get("role") == "user"), {})
-    text = last.get("content", "")
-    if not isinstance(text, str):
-        text = " ".join(p.get("text", "") for p in text if isinstance(p, dict))
-    return any("ऀ" <= ch <= "ॿ" for ch in text)
+    return call_language(params.context.messages) == "Hindi"
 
 
 async def _hold(params: FunctionCallParams, kind: str) -> None:

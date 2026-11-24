@@ -315,3 +315,9 @@
 @media (prefers-reduced-motion: reduce) {
   .pt *, .pt *::before, .pt *::after { animation: none !important; transition: none !important; }
 }
+
+/* mic meter: periwinkle, the caller's colour on the waves */
+.pt .meter { color: var(--peri); }
+.console__head h2 .meter { height: 0.55em; margin-left: 0.35em; }
+.console__speaker { display: inline-flex; align-items: center; }
+.console__speaker .meter { margin: 0 6px 0 0; }

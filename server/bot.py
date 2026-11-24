@@ -67,6 +67,7 @@ class HedgedGoogleLLMService(GoogleLLMService):
             return stream, None
 
     async def _stream_response(self, context):
+        tools.pin_language(context.messages)
         loop = asyncio.get_running_loop()
         give_up = loop.time() + self.HEDGE_SECS + self.GIVE_UP_SECS
         tasks = [asyncio.create_task(self._first_chunk(context, None))]

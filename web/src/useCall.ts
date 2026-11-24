@@ -42,10 +42,14 @@ export function useCall() {
   const agentOpen = useRef(false); // is the last agent line still being spoken?
   const sawWords = useRef(false);
   const segments = useRef(new Map<number, string>()); // the agent's current turn, by segment
+  // The caller's finished phrases this turn. Scribe finalizes at every short pause, so one
+  // sentence arrives as several final pieces; they belong on one line until Asha answers.
+  const callerSaid = useRef("");
   const stopRing = useRef<() => void>(() => {});
   const over = useRef(false); // finish() runs once per call
 
   const pushOrUpdate = useCallback((who: Line["who"], text: string, final: boolean, append: boolean) => {
+    if (who === "agent") callerSaid.current = "";
     setLines((prev) => {
       const last = prev[prev.length - 1];
       const extend = last && last.who === who && !last.final;
@@ -90,6 +94,7 @@ export function useCall() {
     segments.current.clear();
     agentOpen.current = false;
     sawWords.current = false;
+    callerSaid.current = "";
     setLines([]);
     setError(null);
     setReceipt(null);
@@ -127,7 +132,15 @@ export function useCall() {
         },
         onUserTranscript: (d: TranscriptData) => {
           if (agentOpen.current) closeAgentLine();
-          if (d.text.trim()) pushOrUpdate("caller", d.text, d.final, false);
+          const piece = d.text.trim();
+          if (!piece) return;
+          const text = `${callerSaid.current} ${piece}`.trim();
+          if (d.final) callerSaid.current = text;
+          setLines((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.who === "caller") return [...prev.slice(0, -1), { ...last, text, final: d.final }];
+            return [...prev, { id: nextId.current++, who: "caller", text, final: d.final }];
+          });
         },
         onBotOutput: (d: BotOutputData) => {
           if (d.will_be_spoken === false) return;

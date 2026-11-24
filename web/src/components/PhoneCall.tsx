@@ -8,6 +8,7 @@ import {
 import type { useCall } from "../useCall";
 import { useAudioLevels } from "../useAudioLevels";
 import { Ticket } from "./Console";
+import { MicMeter } from "./MicMeter";
 import { Ribbons } from "./Ribbons";
 
 type Call = ReturnType<typeof useCall>;
@@ -42,7 +43,9 @@ export function PhoneCall({ call, onCallAgain }: { call: Call; onCallAgain: () =
           ? "Speaking"
           : muted
             ? "Muted"
-            : "Listening"
+            : speaker === "caller"
+              ? "Hearing you"
+              : "Listening"
         : state === "ended"
           ? "Call ended"
           : "Couldn't connect";
@@ -69,6 +72,7 @@ export function PhoneCall({ call, onCallAgain }: { call: Call; onCallAgain: () =
           </div>
           <h2>Asha</h2>
           <p aria-live="polite">
+            {state === "live" && speaker !== "agent" && !muted && <MicMeter levels={levels} active />}
             {status}
             {startedAt && (
               <>

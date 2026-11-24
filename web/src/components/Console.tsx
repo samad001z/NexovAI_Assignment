@@ -13,6 +13,7 @@ import {
 import { fmtDay, fmtTime } from "../api";
 import type { Receipt, useCall } from "../useCall";
 import { useAudioLevels } from "../useAudioLevels";
+import { MicMeter } from "./MicMeter";
 import { Ribbons } from "./Ribbons";
 
 type Call = ReturnType<typeof useCall>;
@@ -97,7 +98,11 @@ export function Console({ call, onCall, disabled }: { call: Call; onCall: () => 
           ? "Call ended"
           : speaker === "agent"
             ? "Asha is speaking…"
-            : "I'm listening…";
+            : muted
+              ? "You're muted"
+              : speaker === "caller"
+                ? "Hearing you…"
+                : "I'm listening…";
   const sub =
     state === "ringing"
       ? "Connecting you to the Banyan Clinic front desk."
@@ -176,7 +181,10 @@ export function Console({ call, onCall, disabled }: { call: Call; onCall: () => 
             </div>
 
             <div className="console__head" data-enter>
-              <h2 aria-live="polite">{title}</h2>
+              <h2 aria-live="polite">
+                {title}
+                {state === "live" && speaker !== "agent" && <MicMeter levels={levels} active={!muted} />}
+              </h2>
               <p className={state === "failed" ? "is-error" : undefined}>{sub}</p>
             </div>
 
@@ -240,7 +248,16 @@ export function Console({ call, onCall, disabled }: { call: Call; onCall: () => 
         </div>
         {state === "live" && (
           <span className={`console__speaker ${speaker === "agent" ? "is-agent" : ""}`}>
-            {speaker === "agent" ? "Asha speaking" : muted ? "You're muted" : "Listening"}
+            {speaker === "agent" ? (
+              "Asha speaking"
+            ) : muted ? (
+              "You're muted"
+            ) : (
+              <>
+                <MicMeter levels={levels} active />
+                {speaker === "caller" ? "Hearing you" : "Listening"}
+              </>
+            )}
           </span>
         )}
       </div>
