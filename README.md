@@ -102,11 +102,13 @@ Audio from the browser reaches the server over WebRTC and streams to ElevenLabs 
 
 ## Latency
 
-Measured on scripted calls through the real WebRTC server, from the moment the caller stops talking to the moment Asha starts speaking: **1.6–3.4 s, typically about 2.4 s**, in English and Hindi.
+Measured on scripted calls through the real WebRTC server, from the moment the caller stops talking to the moment Asha starts speaking: **typically 2–4 s**, in English and Hindi. Most of the variance is Gemini's free tier: its time to a first word ranged from 0.9 s to 7 s on a busy evening.
 
 - **Gemini stalls.** Flash-Lite sometimes stalls for 5–20 s at busy hours. `HedgedGoogleLLMService` sends the same request to a second model if nothing arrives within 1 s, and uses whichever starts answering first.
 - **Holding lines.** When a tool runs, Asha says a short holding line at once, so the caller never sits in silence.
 - **Turn detection.** Smart Turn's wait after an unfinished-sounding phrase is capped at 1.2 s instead of 3 s.
+- **Broken replies.** Gemini sometimes fails partway through an answer (a 503 after "Dr."). Text is passed to the voice only in whole sentences, so a broken reply is dropped unheard and asked for again.
+- **Interruptions.** While Asha speaks, it takes two words that the voice detector actually hears to interrupt her, so a cough, a click or her own voice leaking into the mic doesn't cut her off.
 
 ## Design notes
 
