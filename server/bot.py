@@ -5,13 +5,22 @@ Browser mic --WebRTC--> VAD + ElevenLabs STT --> Gemini (with tools) --> ElevenL
 
 import asyncio
 import os
+import re
 
 import aiohttp
 
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import BotStartedSpeakingFrame, BotStoppedSpeakingFrame, TTSSpeakFrame
+from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
+    InterimTranscriptionFrame,
+    TranscriptionFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
+)
+from pipecat.frames.frames import TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -41,21 +50,56 @@ from prompt import GREETING, system_prompt
 class QuietVADUserTurnStartStrategy(VADUserTurnStartStrategy):
     """VAD starts the caller's turn, but only while Asha is quiet.
 
-    While she speaks, MinWordsUserTurnStartStrategy decides instead (3 words), so a cough or a
+    While she speaks, MinWordsUserTurnStartStrategy decides instead (2 words), so a cough or a
     click no longer cuts her off. VAD stays in charge the rest of the time because a turn started
     from a transcript loses a VAD stop that came first: a short "Yes" would then wait out
     Pipecat's 5 s stop timeout.
     """
 
     _bot_speaking = False
+    _user_speaking = False
 
     async def process_frame(self, frame):
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            self._user_speaking = True
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._user_speaking = False
         if isinstance(frame, BotStartedSpeakingFrame):
             self._bot_speaking = True
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_speaking = False
+            if self._user_speaking:  # they started while she was finishing: their turn starts now,
+                await self.report_user_turn_started()  # before VAD's stop, or it would be lost
         elif not self._bot_speaking:
             await super().process_frame(frame)
+
+
+class HeardMinWordsUserTurnStartStrategy(MinWordsUserTurnStartStrategy):
+    """MinWords, counting only words spoken while VAD hears the caller.
+
+    Scribe transcribes faint sound that VAD rejects, such as Asha's own voice leaking back
+    into the mic. A turn started from those words never gets a VAD stop, so Scribe never
+    commits a transcript: Asha stopped mid-sentence and the call hung for 10 s (19:43:07).
+    """
+
+    _heard = False
+
+    async def process_frame(self, frame):
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            self._heard = True
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._heard = False
+        elif isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)) and not self._heard:
+            return
+        await super().process_frame(frame)
+
+
+# A sentence is complete: ends in . ! ? or the Devanagari danda, but not "Dr." and friends.
+SENTENCE_END = re.compile(r"(?<!\bDr)(?<!\bMr)(?<!\bMs)(?<!\bMrs)[.!?।][\"')”’]*\s*$")
+
+
+def _text_of(chunk) -> str:
+    return "".join(p.text or "" for c in (chunk.candidates or []) if c.content for p in (c.content.parts or []))
 
 
 class HedgedGoogleLLMService(GoogleLLMService):
@@ -64,12 +108,18 @@ class HedgedGoogleLLMService(GoogleLLMService):
     Flash-Lite usually starts answering in about a second, but at busy times a single
     request stalls for 5-20 s while the next one is fast again. If nothing has arrived
     after HEDGE_SECS, the same request goes to BACKUP_MODEL, and whichever reply starts
-    first is used. The backup is another Flash-Lite route: gemini-3-flash-preview was
+    first is used. A reply can also fail partway: a 503 right after "Dr.", or 11 s of
+    nothing then a 504. So chunks are passed on only once they complete a sentence (the
+    TTS waits for a whole sentence anyway, so this costs nothing), and if the stream
+    breaks or stalls for STALL_SECS, the unfinished sentence is dropped and the request
+    is raced again, once. (Racing to a complete reply instead cost 2-3 s on every turn:
+    Gemini streams the rest of a reply slowly.) The backup is another Flash-Lite route: gemini-3-flash-preview was
     faster on paper but its free quota ran out mid-demo (every request 429).
     """
 
     HEDGE_SECS = 1.0  # healthy Flash-Lite answers in ~1.1 s
-    GIVE_UP_SECS = 15.0
+    GIVE_UP_SECS = 8.0  # then the caller hears an apology instead of more silence
+    STALL_SECS = 3.0  # longest gap between chunks once a reply has started
     BACKUP_MODEL = os.getenv("GEMINI_BACKUP_MODEL", "gemini-flash-lite-latest")
 
     async def _first_chunk(self, context, model: str | None):
@@ -90,6 +140,31 @@ class HedgedGoogleLLMService(GoogleLLMService):
 
     async def _stream_response(self, context):
         tools.pin_language(context.messages)
+        stream, chunk = await self._race(context)
+        held, text, retried = [], "", False  # chunks of a sentence still being written
+        while chunk is not None:
+            held.append(chunk)
+            text += _text_of(chunk)
+            if not text.strip() or SENTENCE_END.search(text):
+                for c in held:
+                    yield c
+                held, text = [], ""
+            try:
+                chunk = await asyncio.wait_for(anext(stream), self.STALL_SECS)
+            except StopAsyncIteration:
+                break
+            except Exception as e:  # a 503/504, or a stall, partway through the reply
+                if retried:
+                    raise
+                retried = True
+                logger.warning(f"{self}: reply broke off ({type(e).__name__}: {str(e)[:80]}), asking again")
+                held, text = [], ""
+                stream, chunk = await self._race(context)
+        for c in held:
+            yield c
+
+    async def _race(self, context):
+        """Ask the main model, add the backup after HEDGE_SECS; returns the first (stream, first chunk)."""
         loop = asyncio.get_running_loop()
         give_up = loop.time() + self.HEDGE_SECS + self.GIVE_UP_SECS
         tasks = [asyncio.create_task(self._first_chunk(context, None))]
@@ -119,12 +194,7 @@ class HedgedGoogleLLMService(GoogleLLMService):
         finally:
             for t in tasks:
                 t.cancel()
-        stream, first = result
-        if first is None:
-            return
-        yield first
-        async for chunk in stream:
-            yield chunk
+        return result
 
 # Asha's voice: ElevenLabs "Tara", a natural Indian-English female voice that also
 # speaks Hindi well. Chosen by the clinic. One voice for every caller,
@@ -214,6 +284,9 @@ async def _run(connection: SmallWebRTCConnection, http: aiohttp.ClientSession) -
     aggregators = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
+            # A turn VAD didn't open never sees VAD's stop, so this timeout ends it: 5 s by
+            # default, heard as Asha going quiet. Smart Turn already ends turns after 1.2 s.
+            user_turn_stop_timeout=2.0,
             # Silero VAD: detects when the caller starts and stops speaking,
             # which drives interruptions and end of turn.
             # 0.2 s is Pipecat's recommended value with its turn analyzer; 0.5 s added
@@ -227,11 +300,12 @@ async def _run(connection: SmallWebRTCConnection, http: aiohttp.ClientSession) -
             # reply ("Yes.", "Ha.") unfinished, it waits for silence: 3 s by default,
             # which callers hear as Asha being slow. 1.2 s of silence is a clear enough stop.
             # Pipecat's default lets any sound the VAD hears (a cough, a click, "hmm") cut Asha
-            # off mid-sentence. While she speaks, it now takes 3 transcribed words to interrupt
-            # her; while she is quiet, VAD starts the caller's turn at once, as before.
+            # off mid-sentence. While she speaks, it now takes 2 transcribed words to interrupt
+            # her ("five thirty" counts, "hmm" doesn't: at 3 words a short answer said over
+            # her was dropped); while she is quiet, VAD starts the caller's turn at once.
             # Whisper sends no interim words, so it keeps the default.
             user_turn_strategies=UserTurnStrategies(
-                start=None if whisper else [QuietVADUserTurnStartStrategy(), MinWordsUserTurnStartStrategy(min_words=3)],
+                start=None if whisper else [QuietVADUserTurnStartStrategy(), HeardMinWordsUserTurnStartStrategy(min_words=2)],
                 stop=[TurnAnalyzerUserTurnStopStrategy(
                     turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=1.2))
                 )]
