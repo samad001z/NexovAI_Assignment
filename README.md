@@ -14,7 +14,7 @@ Call Asha from the browser and talk to her as you would to a clinic's front desk
 |---|---|
 | Voice pipeline | [Pipecat](https://github.com/pipecat-ai/pipecat) 1.17 (Python), SmallWebRTC transport (browser ↔ server WebRTC, no third-party room service) |
 | Speech to text | ElevenLabs Scribe v2 Realtime, streamed over a websocket, with automatic language detection |
-| LLM | Google Gemini `gemini-3.5-flash-lite` (free tier), with `gemini-3-flash-preview` as a backup when it is slow |
+| LLM | Google Gemini `gemini-3.5-flash-lite` (free tier), with `gemini-flash-lite-latest` raced against it when it is slow |
 | Text to speech | ElevenLabs Flash v2.5, voice "Tara" (Indian English and Hindi) |
 | Turn taking | Silero VAD plus Pipecat's Smart Turn v3 model |
 | Data | SQLite: 5 doctors, 30-minute slots for the next 5 working days |
@@ -120,4 +120,4 @@ Measured on scripted calls through the real WebRTC server, from the moment the c
 
 - The staff desk has no login. Anyone who can reach the server can see `/desk` and the `/api` data, so put it behind authentication before real use.
 - One server process holds the call state. That is fine for a demo; horizontal scaling would need a shared event bus.
-- On slow turns the backup model doubles the LLM cost. The preview model has a low rate limit, and when it is hit the main model still answers.
+- On slow turns the backup request doubles the LLM cost, and it counts against the free tier's daily quota. If the backup is rate-limited, the main model still answers.

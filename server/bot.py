@@ -11,7 +11,7 @@ import aiohttp
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import TTSSpeakFrame
+from pipecat.frames.frames import BotStartedSpeakingFrame, BotStoppedSpeakingFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -26,7 +26,7 @@ from google.genai.types import HttpOptions, HttpRetryOptions
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.services.google.llm import GoogleLLMService
-from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
+from pipecat.turns.user_start import MinWordsUserTurnStartStrategy, VADUserTurnStartStrategy
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.transports.base_transport import TransportParams
@@ -38,18 +38,39 @@ import tools
 from prompt import GREETING, system_prompt
 
 
+class QuietVADUserTurnStartStrategy(VADUserTurnStartStrategy):
+    """VAD starts the caller's turn, but only while Asha is quiet.
+
+    While she speaks, MinWordsUserTurnStartStrategy decides instead (3 words), so a cough or a
+    click no longer cuts her off. VAD stays in charge the rest of the time because a turn started
+    from a transcript loses a VAD stop that came first: a short "Yes" would then wait out
+    Pipecat's 5 s stop timeout.
+    """
+
+    _bot_speaking = False
+
+    async def process_frame(self, frame):
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_speaking = True
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_speaking = False
+        elif not self._bot_speaking:
+            await super().process_frame(frame)
+
+
 class HedgedGoogleLLMService(GoogleLLMService):
     """Gemini, with a backup request to a second model when the first is slow.
 
-    Flash-Lite usually starts answering in about a second, but at busy times it takes
-    5-20 s. If nothing has arrived after HEDGE_SECS, the same request goes to
-    BACKUP_MODEL, which runs on separate capacity, and whichever reply starts first is
-    used. The backup only sees slow turns, which keeps it under its rate limit.
+    Flash-Lite usually starts answering in about a second, but at busy times a single
+    request stalls for 5-20 s while the next one is fast again. If nothing has arrived
+    after HEDGE_SECS, the same request goes to BACKUP_MODEL, and whichever reply starts
+    first is used. The backup is another Flash-Lite route: gemini-3-flash-preview was
+    faster on paper but its free quota ran out mid-demo (every request 429).
     """
 
     HEDGE_SECS = 1.0  # healthy Flash-Lite answers in ~1.1 s
     GIVE_UP_SECS = 15.0
-    BACKUP_MODEL = os.getenv("GEMINI_BACKUP_MODEL", "gemini-3-flash-preview")
+    BACKUP_MODEL = os.getenv("GEMINI_BACKUP_MODEL", "gemini-flash-lite-latest")
 
     async def _first_chunk(self, context, model: str | None):
         """Send the request and wait for its first chunk. Returns (stream, first chunk or None)."""
@@ -207,10 +228,10 @@ async def _run(connection: SmallWebRTCConnection, http: aiohttp.ClientSession) -
             # which callers hear as Asha being slow. 1.2 s of silence is a clear enough stop.
             # Pipecat's default lets any sound the VAD hears (a cough, a click, "hmm") cut Asha
             # off mid-sentence. While she speaks, it now takes 3 transcribed words to interrupt
-            # her; when she is quiet, one word starts the caller's turn. Whisper sends no
-            # interim words, so it keeps the default VAD start.
+            # her; while she is quiet, VAD starts the caller's turn at once, as before.
+            # Whisper sends no interim words, so it keeps the default.
             user_turn_strategies=UserTurnStrategies(
-                start=None if whisper else [MinWordsUserTurnStartStrategy(min_words=3)],
+                start=None if whisper else [QuietVADUserTurnStartStrategy(), MinWordsUserTurnStartStrategy(min_words=3)],
                 stop=[TurnAnalyzerUserTurnStopStrategy(
                     turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=1.2))
                 )]
