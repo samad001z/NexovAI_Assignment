@@ -26,6 +26,7 @@ from google.genai.types import HttpOptions, HttpRetryOptions
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.transports.base_transport import TransportParams
@@ -204,7 +205,12 @@ async def _run(connection: SmallWebRTCConnection, http: aiohttp.ClientSession) -
             # Smart Turn decides whether the caller has finished. When it judges a short
             # reply ("Yes.", "Ha.") unfinished, it waits for silence: 3 s by default,
             # which callers hear as Asha being slow. 1.2 s of silence is a clear enough stop.
+            # Pipecat's default lets any sound the VAD hears (a cough, a click, "hmm") cut Asha
+            # off mid-sentence. While she speaks, it now takes 3 transcribed words to interrupt
+            # her; when she is quiet, one word starts the caller's turn. Whisper sends no
+            # interim words, so it keeps the default VAD start.
             user_turn_strategies=UserTurnStrategies(
+                start=None if whisper else [MinWordsUserTurnStartStrategy(min_words=3)],
                 stop=[TurnAnalyzerUserTurnStopStrategy(
                     turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=1.2))
                 )]
