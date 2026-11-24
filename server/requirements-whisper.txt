@@ -1,0 +1,6 @@
+# Optional: run speech-to-text locally with Whisper instead of ElevenLabs (STT_ENGINE=whisper).
+-r requirements.txt
+pipecat-ai[whisper]==1.17.0
+# CUDA 12 libraries for faster-whisper on an NVIDIA GPU. Skip on CPU-only machines.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10
